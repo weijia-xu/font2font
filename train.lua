@@ -133,29 +133,31 @@ function defineD(input_nc, output_nc, ndf)
     return netD
 end
 
-print('define model encoder...')
-encoder = define_encoder(input_nc, output_nc, ngf)
+print('define encoders A&B...')
+encoderA = define_encoder(input_nc, output_nc, ngf)
+encoderB = define_encoder(input_nc, output_nc, ngf)
 print('define model netG...')
 netG = defineG(input_nc, output_nc, ngf)
 print('define model netD...')
 netD = defineD(input_nc, output_nc, ndf)
 
--- encoder shares all the parameters of netG
-encoder:share(netG, 'weight', 'bias', 'gradWeight', 'gradBias')
+-- encoderA shares all the parameters of netG
+encoderA:share(netG, 'weight', 'bias', 'gradWeight', 'gradBias')
 
 -- load saved models and finetune
 if opt.continue_train == 1 then
+  print('loadign previously trained encoder B...')
+  encoderB = util.load(paths.concat(opt.checkpoints_dir, opt.name, 'latest_enc_B.t7'), opt)
   print('loading previously trained netG...')
   netG = util.load(paths.concat(opt.checkpoints_dir, opt.name, 'latest_net_G.t7'), opt)
   print('loading previously trained netD...')
   netD = util.load(paths.concat(opt.checkpoints_dir, opt.name, 'latest_net_D.t7'), opt)
 else
+  encoderB:apply(weights_init)
   netG:apply(weights_init)
   netD:apply(weights_init)
 end
 
-print(encoder)
-print(netG)
 print(netD)
 
 
@@ -171,6 +173,10 @@ optimStateD = {
    learningRate = opt.lr,
    beta1 = opt.beta1,
 }
+optimStateE = {
+  learningRate = opt.lr,
+  beta1 = opt.beta1,
+}
 ----------------------------------------------------------------------------
 local real_A = torch.Tensor(opt.batchSize, input_nc, opt.fineSize, opt.fineSize)
 local real_B = torch.Tensor(opt.batchSize, output_nc, opt.fineSize, opt.fineSize)
@@ -178,6 +184,7 @@ local fake_B = torch.Tensor(opt.batchSize, output_nc, opt.fineSize, opt.fineSize
 local real_AB = torch.Tensor(opt.batchSize, output_nc + input_nc*opt.condition_GAN, opt.fineSize, opt.fineSize)
 local fake_AB = torch.Tensor(opt.batchSize, output_nc + input_nc*opt.condition_GAN, opt.fineSize, opt.fineSize)
 local encoded_real_A = torch.Tensor(opt.batchSize, ngf * 8, 1, 1)
+local encoded_real_B = torch.Tensor(opt.batchSize, ngf * 8, 1, 1)
 local encoded_fake_B = torch.Tensor(opt.batchSize, ngf * 8, 1, 1)
 
 local constant_loss = 0
@@ -195,12 +202,15 @@ if opt.gpu > 0 then
    real_B = real_B:cuda(); fake_B = fake_B:cuda();
    real_AB = real_AB:cuda(); fake_AB = fake_AB:cuda();
    encoded_real_A = encoded_real_A:cuda();
+   encoded_real_B = encoded_real_B:cuda();
    encoded_fake_B = encoded_fake_B:cuda();
    if opt.cudnn==1 then
-      encoder = util.cudnn(encoder);
+      encoderA = util.cudnn(encoderA);
+      encoderB = util.cudnn(encoderB);
       netG = util.cudnn(netG); netD = util.cudnn(netD);
    end
-   encoder:cuda(); netD:cuda(); netG:cuda(); criterion:cuda(); criterionAE:cuda(); criterionSQ:cuda();
+   encoderA:cuda(); encoderB:cuda(); netD:cuda(); netG:cuda();
+   criterion:cuda(); criterionAE:cuda(); criterionSQ:cuda();
    print('done')
 else
   print('running model on CPU')
@@ -209,6 +219,7 @@ end
 
 local parametersD, gradParametersD = netD:getParameters()
 local parametersG, gradParametersG = netG:getParameters()
+local parametersE, gradParametersE = encoderB:getParameters()
 
 
 
@@ -232,8 +243,9 @@ function createRealFake()
     
     -- create fake
     fake_B = netG:forward(real_A)
-    encoded_fake_B = encoder:forward(fake_B)
-    encoded_real_A = encoder:forward(real_A)
+    encoded_real_B = encoderB:forward(real_B)
+    encoded_fake_B = encoderB:forward(fake_B)
+    encoded_real_A = encoderA:forward(real_A)
 
     if opt.condition_GAN==1 then
         fake_AB = torch.cat(real_A,fake_B,2)
@@ -246,7 +258,7 @@ end
 local fDx = function(x)
     netD:apply(function(m) if torch.type(m):find('Convolution') then m.bias:zero() end end)
     netG:apply(function(m) if torch.type(m):find('Convolution') then m.bias:zero() end end)
-    
+
     gradParametersD:zero()
     
     -- Real
@@ -276,6 +288,7 @@ end
 local fGx = function(x)
     netD:apply(function(m) if torch.type(m):find('Convolution') then m.bias:zero() end end)
     netG:apply(function(m) if torch.type(m):find('Convolution') then m.bias:zero() end end)
+    encoderB:apply(function(m) if torch.type(m):find('Convolution') then m.bias:zero() end end)
     
     gradParametersG:zero()
     
@@ -318,7 +331,7 @@ local fGx = function(x)
     if opt.use_Lconst==1 then
       errLconst = criterionSQ:forward(encoded_fake_B, encoded_real_A)
       local df_do_Lconst = criterionSQ:backward(encoded_fake_B, encoded_real_A)
-      df_dg_Lconst = encoder:updateGradInput(fake_AB, df_do_Lconst)
+      df_dg_Lconst = encoderB:updateGradInput(fake_AB, df_do_Lconst)
     else
       errLconst = 0
     end
@@ -326,6 +339,25 @@ local fGx = function(x)
     netG:backward(real_A, df_dg + df_do_L1:mul(opt.L1_penalty) + df_dg_Lconst:mul(opt.Lconst_penalty))
     
     return errG, gradParametersG
+end
+
+-- create closure to evaluate f(X) and df/dX of encoder B
+local fEx = function(x)
+    encoderB:apply(function(m) if torch.type(m):find('Convolution') then m.bias:zero() end end)
+
+    gradParametersE:zero()
+
+    local df_do = torch.zeros(encoded_real_B:size())
+    if opt.gpu>0 then
+      df_do = df_do:cuda();
+    end
+
+    errE = criterionSQ:forward(encoded_real_B, encoded_real_A)
+    df_do = criterionSQ:backward(encoded_real_B, encoded_real_A)
+
+    encoderB:backward(real_B, df_do)
+
+    return errE, gradParametersE
 end
 
 
@@ -372,7 +404,10 @@ for epoch = 1, opt.niter do
         -- (1) Update D network: minimize log(1 - D(x,y)) + log(D(x,G(x)))
         if opt.use_GAN==1 then optim.adam(fDx, parametersD, optimStateD) end
         
-        -- (2) Update G network: minimize log(1 - D(x,G(x))) + L1(y,G(x)) + L2(encode(x), encode(G(x)))
+        -- (2) Update B encoder: minimize L2(encA(x), encB(y))
+        if opt.use_Lconst==1 then optim.adam(fEx, parametersE, optimStateE) end
+
+        -- (3) Update G network: minimize log(1 - D(x,G(x))) + L1(y,G(x)) + L2(encA(x), encB(G(x)))
         optim.adam(fGx, parametersG, optimStateG)
 
         -- display
@@ -455,6 +490,7 @@ for epoch = 1, opt.niter do
             print(('saving the latest model (epoch %d, iters %d)'):format(epoch, counter))
             torch.save(paths.concat(opt.checkpoints_dir, opt.name, 'latest_net_G.t7'), netG:clearState())
             torch.save(paths.concat(opt.checkpoints_dir, opt.name, 'latest_net_D.t7'), netD:clearState())
+            torch.save(paths.concat(opt.checkpoints_dir, opt.name, 'latest_enc_B.t7'), encoderB:clearState())
         end
         
     end
@@ -462,14 +498,17 @@ for epoch = 1, opt.niter do
     
     parametersD, gradParametersD = nil, nil -- nil them to avoid spiking memory
     parametersG, gradParametersG = nil, nil
+    parametersE, gradParametersE = nil, nil
     
     if epoch % opt.save_epoch_freq == 0 then
         torch.save(paths.concat(opt.checkpoints_dir, opt.name,  epoch .. '_net_G.t7'), netG:clearState())
         torch.save(paths.concat(opt.checkpoints_dir, opt.name, epoch .. '_net_D.t7'), netD:clearState())
+        torch.save(paths.concat(opt.checkpoints_dir, opt.name,  epoch .. '_enc_B.t7'), encoderB:clearState())
     end
     
     print(('End of epoch %d / %d \t Time Taken: %.3f'):format(
             epoch, opt.niter, epoch_tm:time().real))
     parametersD, gradParametersD = netD:getParameters() -- reflatten the params and get them
     parametersG, gradParametersG = netG:getParameters()
+    parametersE, gradParametersE = encoderB:getParameters()
 end
