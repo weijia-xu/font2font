@@ -369,10 +369,10 @@ for epoch = 1, opt.niter do
         -- load a batch and run G on that batch
         createRealFake()
         
-        -- (1) Update D network: maximize log(D(x,y)) + log(1 - D(x,G(x)))
+        -- (1) Update D network: minimize log(1 - D(x,y)) + log(D(x,G(x)))
         if opt.use_GAN==1 then optim.adam(fDx, parametersD, optimStateD) end
         
-        -- (2) Update G network: maximize log(D(x,G(x))) + L1(y,G(x))
+        -- (2) Update G network: minimize log(1 - D(x,G(x))) + L1(y,G(x)) + L2(encode(x), encode(G(x)))
         optim.adam(fGx, parametersG, optimStateG)
 
         -- display
