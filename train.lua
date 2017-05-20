@@ -14,7 +14,7 @@ require 'models'
 opt = {
    DATA_ROOT = '',         -- path to images (should have subfolders 'train', 'val', etc)
    batchSize = 16,          -- # images in batch
-   loadSize = 286,         -- scale images to this size
+   loadSize = 256,         -- scale images to this size
    fineSize = 256,         --  then crop to this size
    ngf = 64,               -- #  of gen filters in first conv layer
    ndf = 64,               -- #  of discrim filters in first conv layer
@@ -188,30 +188,30 @@ local encoded_real_B = torch.Tensor(opt.batchSize, ngf * 8, 1, 1)
 local encoded_fake_B = torch.Tensor(opt.batchSize, ngf * 8, 1, 1)
 
 local constant_loss = 0
-local errD, errG, errL1 = 0, 0, 0
+local errD, errG, errL1, errL2 = 0, 0, 0, 0
 local epoch_tm = torch.Timer()
 local tm = torch.Timer()
 local data_tm = torch.Timer()
 ----------------------------------------------------------------------------
 
 if opt.gpu > 0 then
-   print('transferring to gpu...')
-   require 'cunn'
-   cutorch.setDevice(opt.gpu)
-   real_A = real_A:cuda();
-   real_B = real_B:cuda(); fake_B = fake_B:cuda();
-   real_AB = real_AB:cuda(); fake_AB = fake_AB:cuda();
-   encoded_real_A = encoded_real_A:cuda();
-   encoded_real_B = encoded_real_B:cuda();
-   encoded_fake_B = encoded_fake_B:cuda();
-   if opt.cudnn==1 then
-      encoderA = util.cudnn(encoderA);
-      encoderB = util.cudnn(encoderB);
-      netG = util.cudnn(netG); netD = util.cudnn(netD);
-   end
-   encoderA:cuda(); encoderB:cuda(); netD:cuda(); netG:cuda();
-   criterion:cuda(); criterionAE:cuda(); criterionSQ:cuda();
-   print('done')
+  print('transferring to gpu...')
+  require 'cunn'
+  cutorch.setDevice(opt.gpu)
+  real_A = real_A:cuda();
+  real_B = real_B:cuda(); fake_B = fake_B:cuda();
+  real_AB = real_AB:cuda(); fake_AB = fake_AB:cuda();
+  encoded_real_A = encoded_real_A:cuda();
+  encoded_real_B = encoded_real_B:cuda();
+  encoded_fake_B = encoded_fake_B:cuda();
+  if opt.cudnn==1 then
+    encoderA = util.cudnn(encoderA);
+    encoderB = util.cudnn(encoderB);
+    netG = util.cudnn(netG); netD = util.cudnn(netD);
+  end
+  encoderA:cuda(); encoderB:cuda(); netD:cuda(); netG:cuda();
+  criterion:cuda(); criterionAE:cuda(); criterionSQ:cuda();
+  print('done')
 else
   print('running model on CPU')
 end
@@ -236,9 +236,9 @@ function createRealFake()
     real_B:copy(real_data[{ {}, idx_B, {}, {} }])
     
     if opt.condition_GAN==1 then
-        real_AB = torch.cat(real_A,real_B,2)
+      real_AB = torch.cat(real_A,real_B,2)
     else
-        real_AB = real_B -- unconditional GAN, only penalizes structure in B
+      real_AB = real_B -- unconditional GAN, only penalizes structure in B
     end
     
     -- create fake
@@ -248,9 +248,9 @@ function createRealFake()
     encoded_real_A = encoderA:forward(real_A)
 
     if opt.condition_GAN==1 then
-        fake_AB = torch.cat(real_A,fake_B,2)
+      fake_AB = torch.cat(real_A,fake_B,2)
     else
-        fake_AB = fake_B -- unconditional GAN, only penalizes structure in B
+      fake_AB = fake_B -- unconditional GAN, only penalizes structure in B
     end
 end
 
@@ -292,6 +292,9 @@ local fGx = function(x)
     
     gradParametersG:zero()
     
+    -- L2 error
+    errL2 = criterionSQ:forward(fake_B, real_B)
+
     -- GAN loss
     local df_dg = torch.zeros(fake_B:size())
     if opt.gpu>0 then 
@@ -317,10 +320,10 @@ local fGx = function(x)
       df_do_L1 = df_do_L1:cuda();
     end
     if opt.use_L1==1 then
-       errL1 = criterionAE:forward(fake_B, real_B)
-       df_do_L1 = criterionAE:backward(fake_B, real_B)
+      errL1 = criterionAE:forward(fake_B, real_B)
+      df_do_L1 = criterionAE:backward(fake_B, real_B)
     else
-        errL1 = 0
+      errL1 = 0
     end
 
     -- f-constancy term
@@ -394,121 +397,119 @@ local plot_win
 
 local counter = 0
 for epoch = 1, opt.niter do
-    epoch_tm:reset()
-    for i = 1, math.min(data:size(), opt.ntrain), opt.batchSize do
-        tm:reset()
-        
-        -- load a batch and run G on that batch
-        createRealFake()
-        
-        -- (1) Update D network: minimize log(1 - D(x,y)) + log(D(x,G(x)))
-        if opt.use_GAN==1 then optim.adam(fDx, parametersD, optimStateD) end
-        
-        -- (2) Update B encoder: minimize L2(encA(x), encB(y))
-        if opt.use_Lconst==1 then optim.adam(fEx, parametersE, optimStateE) end
+  epoch_tm:reset()
+  for i = 1, math.min(data:size(), opt.ntrain), opt.batchSize do
+    tm:reset()
 
-        -- (3) Update G network: minimize log(1 - D(x,G(x))) + L1(y,G(x)) + L2(encA(x), encB(G(x)))
-        optim.adam(fGx, parametersG, optimStateG)
+    -- load a batch and run G on that batch
+    createRealFake()
+    
+    -- (1) Update D network: minimize log(1 - D(x,y)) + log(D(x,G(x)))
+    if opt.use_GAN==1 then optim.adam(fDx, parametersD, optimStateD) end
+    
+    -- (2) Update B encoder: minimize L2(encA(x), encB(y))
+    if opt.use_Lconst==1 then optim.adam(fEx, parametersE, optimStateE) end
 
-        -- display
-        counter = counter + 1
-        if counter % opt.display_freq == 0 and opt.display then
-            createRealFake()
-            if opt.preprocess == 'colorization' then 
-                local real_A_s = util.scaleBatch(real_A:float(),100,100)
-                local fake_B_s = util.scaleBatch(fake_B:float(),100,100)
-                local real_B_s = util.scaleBatch(real_B:float(),100,100)
-                disp.image(util.deprocessL_batch(real_A_s), {win=opt.display_id, title=opt.name .. ' input'})
-                disp.image(util.deprocessLAB_batch(real_A_s, fake_B_s), {win=opt.display_id+1, title=opt.name .. ' output'})
-                disp.image(util.deprocessLAB_batch(real_A_s, real_B_s), {win=opt.display_id+2, title=opt.name .. ' target'})
-            else
-                disp.image(util.deprocess_batch(util.scaleBatch(real_A:float(),100,100)), {win=opt.display_id, title=opt.name .. ' input'})
-                disp.image(util.deprocess_batch(util.scaleBatch(fake_B:float(),100,100)), {win=opt.display_id+1, title=opt.name .. ' output'})
-                disp.image(util.deprocess_batch(util.scaleBatch(real_B:float(),100,100)), {win=opt.display_id+2, title=opt.name .. ' target'})
-            end
-        end
+    -- (3) Update G network: minimize log(1 - D(x,G(x))) + L1(y,G(x)) + L2(encA(x), encB(G(x)))
+    optim.adam(fGx, parametersG, optimStateG)
+
+    -- display
+    counter = counter + 1
+    if counter % opt.display_freq == 0 and opt.display then
+      createRealFake()
+      if opt.preprocess == 'colorization' then 
+        local real_A_s = util.scaleBatch(real_A:float(),100,100)
+        local fake_B_s = util.scaleBatch(fake_B:float(),100,100)
+        local real_B_s = util.scaleBatch(real_B:float(),100,100)
+        disp.image(util.deprocessL_batch(real_A_s), {win=opt.display_id, title=opt.name .. ' input'})
+        disp.image(util.deprocessLAB_batch(real_A_s, fake_B_s), {win=opt.display_id+1, title=opt.name .. ' output'})
+        disp.image(util.deprocessLAB_batch(real_A_s, real_B_s), {win=opt.display_id+2, title=opt.name .. ' target'})
+      else
+        disp.image(util.deprocess_batch(util.scaleBatch(real_A:float(),100,100)), {win=opt.display_id, title=opt.name .. ' input'})
+        disp.image(util.deprocess_batch(util.scaleBatch(fake_B:float(),100,100)), {win=opt.display_id+1, title=opt.name .. ' output'})
+        disp.image(util.deprocess_batch(util.scaleBatch(real_B:float(),100,100)), {win=opt.display_id+2, title=opt.name .. ' target'})
+      end
+    end
+  
+    -- write display visualization to disk
+    --  runs on the first batchSize images in the opt.phase set
+    if counter % opt.save_display_freq == 0 and opt.display then
+      local serial_batches=opt.serial_batches
+      opt.serial_batches=1
+      opt.serial_batch_iter=1
       
-        -- write display visualization to disk
-        --  runs on the first batchSize images in the opt.phase set
-        if counter % opt.save_display_freq == 0 and opt.display then
-            local serial_batches=opt.serial_batches
-            opt.serial_batches=1
-            opt.serial_batch_iter=1
-            
-            local image_out = nil
-            local N_save_display = 10 
-            local N_save_iter = torch.max(torch.Tensor({1, torch.floor(N_save_display/opt.batchSize)}))
-            for i3=1, N_save_iter do
-            
-                createRealFake()
-                print('save to the disk')
-                if opt.preprocess == 'colorization' then 
-                    for i2=1, fake_B:size(1) do
-                        if image_out==nil then image_out = torch.cat(util.deprocessL(real_A[i2]:float()),util.deprocessLAB(real_A[i2]:float(), fake_B[i2]:float()),3)/255.0
-                        else image_out = torch.cat(image_out, torch.cat(util.deprocessL(real_A[i2]:float()),util.deprocessLAB(real_A[i2]:float(), fake_B[i2]:float()),3)/255.0, 2) end
-                    end
-                else
-                    for i2=1, fake_B:size(1) do
-                        if image_out==nil then image_out = torch.cat(util.deprocess(real_A[i2]:float()),util.deprocess(fake_B[i2]:float()),3)
-                        else image_out = torch.cat(image_out, torch.cat(util.deprocess(real_A[i2]:float()),util.deprocess(fake_B[i2]:float()),3), 2) end
-                    end
-                end
-            end
-            image.save(paths.concat(opt.checkpoints_dir,  opt.name , counter .. '_train_res.png'), image_out)
-            
-            opt.serial_batches=serial_batches
+      local image_out = nil
+      local N_save_display = 10 
+      local N_save_iter = torch.max(torch.Tensor({1, torch.floor(N_save_display/opt.batchSize)}))
+      for i3=1, N_save_iter do
+        createRealFake()
+        print('save to the disk')
+        if opt.preprocess == 'colorization' then 
+          for i2=1, fake_B:size(1) do
+            if image_out==nil then image_out = torch.cat(util.deprocessL(real_A[i2]:float()),util.deprocessLAB(real_A[i2]:float(), fake_B[i2]:float()),3)/255.0
+            else image_out = torch.cat(image_out, torch.cat(util.deprocessL(real_A[i2]:float()),util.deprocessLAB(real_A[i2]:float(), fake_B[i2]:float()),3)/255.0, 2) end
+          end
+        else
+          for i2=1, fake_B:size(1) do
+            if image_out==nil then image_out = torch.cat(util.deprocess(real_A[i2]:float()),util.deprocess(fake_B[i2]:float()),3)
+            else image_out = torch.cat(image_out, torch.cat(util.deprocess(real_A[i2]:float()),util.deprocess(fake_B[i2]:float()),3), 2) end
+          end
         end
-        
-        -- logging and display plot
-        if counter % opt.print_freq == 0 then
-            local loss = {errG=errG and errG or -1, errD=errD and errD or -1, errL1=errL1 and errL1 or -1}
-            local curItInBatch = ((i-1) / opt.batchSize)
-            local totalItInBatch = math.floor(math.min(data:size(), opt.ntrain) / opt.batchSize)
-            print(('Epoch: [%d][%8d / %8d]\t Time: %.3f  DataTime: %.3f  '
-                    .. '  Err_G: %.4f  Err_D: %.4f  ErrL1: %.4f'):format(
-                     epoch, curItInBatch, totalItInBatch,
-                     tm:time().real / opt.batchSize, data_tm:time().real / opt.batchSize,
-                     errG, errD, errL1))
-           
-            local plot_vals = { epoch + curItInBatch / totalItInBatch }
-            for k, v in ipairs(opt.display_plot) do
-              if loss[v] ~= nil then
-               plot_vals[#plot_vals + 1] = loss[v] 
-             end
-            end
+      end
+      image.save(paths.concat(opt.checkpoints_dir,  opt.name , counter .. '_train_res.png'), image_out)
+      
+      opt.serial_batches=serial_batches
+    end
+    
+    -- logging and display plot
+    if counter % opt.print_freq == 0 then
+      local loss = {errG=errG and errG or -1, errD=errD and errD or -1, errL1=errL1 and errL1 or -1}
+      local curItInBatch = ((i-1) / opt.batchSize)
+      local totalItInBatch = math.floor(math.min(data:size(), opt.ntrain) / opt.batchSize)
+      print(('Epoch: [%d][%6d / %6d]\t Time: %.2f  DataTime: %.2f  '
+              .. '  Err_G: %.3f  Err_D: %.3f  ErrL2: %.3f  ErrLc: %.3f'):format(
+               epoch, curItInBatch, totalItInBatch,
+               tm:time().real / opt.batchSize, data_tm:time().real / opt.batchSize,
+               errG, errD, errL2, errLconst))
+     
+      local plot_vals = { epoch + curItInBatch / totalItInBatch }
+      for k, v in ipairs(opt.display_plot) do
+        if loss[v] ~= nil then
+        plot_vals[#plot_vals + 1] = loss[v] 
+       end
+      end
 
-            -- update display plot
-            if opt.display then
-              table.insert(plot_data, plot_vals)
-              plot_config.win = plot_win
-              plot_win = disp.plot(plot_data, plot_config)
-            end
-        end
-        
-        -- save latest model
-        if counter % opt.save_latest_freq == 0 then
-            print(('saving the latest model (epoch %d, iters %d)'):format(epoch, counter))
-            torch.save(paths.concat(opt.checkpoints_dir, opt.name, 'latest_net_G.t7'), netG:clearState())
-            torch.save(paths.concat(opt.checkpoints_dir, opt.name, 'latest_net_D.t7'), netD:clearState())
-            torch.save(paths.concat(opt.checkpoints_dir, opt.name, 'latest_enc_B.t7'), encoderB:clearState())
-        end
-        
+      -- update display plot
+      if opt.display then
+        table.insert(plot_data, plot_vals)
+        plot_config.win = plot_win
+        plot_win = disp.plot(plot_data, plot_config)
+      end
     end
     
-    
-    parametersD, gradParametersD = nil, nil -- nil them to avoid spiking memory
-    parametersG, gradParametersG = nil, nil
-    parametersE, gradParametersE = nil, nil
-    
-    if epoch % opt.save_epoch_freq == 0 then
-        torch.save(paths.concat(opt.checkpoints_dir, opt.name,  epoch .. '_net_G.t7'), netG:clearState())
-        torch.save(paths.concat(opt.checkpoints_dir, opt.name, epoch .. '_net_D.t7'), netD:clearState())
-        torch.save(paths.concat(opt.checkpoints_dir, opt.name,  epoch .. '_enc_B.t7'), encoderB:clearState())
-    end
-    
-    print(('End of epoch %d / %d \t Time Taken: %.3f'):format(
-            epoch, opt.niter, epoch_tm:time().real))
-    parametersD, gradParametersD = netD:getParameters() -- reflatten the params and get them
-    parametersG, gradParametersG = netG:getParameters()
-    parametersE, gradParametersE = encoderB:getParameters()
+    -- save latest model
+    if counter % opt.save_latest_freq == 0 then
+      print(('saving the latest model (epoch %d, iters %d)'):format(epoch, counter))
+      torch.save(paths.concat(opt.checkpoints_dir, opt.name, 'latest_net_G.t7'), netG:clearState())
+      torch.save(paths.concat(opt.checkpoints_dir, opt.name, 'latest_net_D.t7'), netD:clearState())
+      torch.save(paths.concat(opt.checkpoints_dir, opt.name, 'latest_enc_B.t7'), encoderB:clearState())
+    end   
+  end
+  
+  
+  parametersD, gradParametersD = nil, nil -- nil them to avoid spiking memory
+  parametersG, gradParametersG = nil, nil
+  parametersE, gradParametersE = nil, nil
+  
+  if epoch % opt.save_epoch_freq == 0 then
+    torch.save(paths.concat(opt.checkpoints_dir, opt.name,  epoch .. '_net_G.t7'), netG:clearState())
+    torch.save(paths.concat(opt.checkpoints_dir, opt.name, epoch .. '_net_D.t7'), netD:clearState())
+    torch.save(paths.concat(opt.checkpoints_dir, opt.name,  epoch .. '_enc_B.t7'), encoderB:clearState())
+  end
+  
+  print(('End of epoch %d / %d \t Time Taken: %.2f'):format(
+          epoch, opt.niter, epoch_tm:time().real))
+  parametersD, gradParametersD = netD:getParameters() -- reflatten the params and get them
+  parametersG, gradParametersG = netG:getParameters()
+  parametersE, gradParametersE = encoderB:getParameters()
 end
