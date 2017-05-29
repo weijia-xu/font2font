@@ -336,7 +336,7 @@ local fGx = function(x)
       local df_do_Lconst = criterionSQ:backward(encoded_fake_B, encoded_real_A)
       df_dg_Lconst = encoderB:updateGradInput(fake_AB, df_do_Lconst)
     else
-      errLconst = 0
+      errLconst = criterionSQ:forward(encoded_fake_B, encoded_real_A)
     end
     
     netG:backward(real_A, df_dg + df_do_L1:mul(opt.L1_penalty) + df_dg_Lconst:mul(opt.Lconst_penalty))
@@ -408,7 +408,7 @@ for epoch = 1, opt.niter do
     if opt.use_GAN==1 then optim.adam(fDx, parametersD, optimStateD) end
     
     -- (2) Update B encoder: minimize L2(encA(x), encB(y))
-    if opt.use_Lconst==1 then optim.adam(fEx, parametersE, optimStateE) end
+    optim.adam(fEx, parametersE, optimStateE)
 
     -- (3) Update G network: minimize log(1 - D(x,G(x))) + L1(y,G(x)) + L2(encA(x), encB(G(x)))
     optim.adam(fGx, parametersG, optimStateG)
