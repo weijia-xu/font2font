@@ -101,7 +101,7 @@ parser.add_argument('--shuffle', dest='shuffle', type=int, default=0, help='shuf
 parser.add_argument('--char_size', dest='char_size', type=int, default=150, help='character size')
 parser.add_argument('--canvas_size', dest='canvas_size', type=int, default=256, help='canvas size')
 parser.add_argument('--x_offset', dest='x_offset', type=int, default=20, help='x offset')
-parser.add_argument('--y_offset', dest='y_offset', type=int, default=20, help='y_offset')
+parser.add_argument('--y_offset', dest='y_offset', type=int, default=20, help='y offset')
 parser.add_argument('--sample_count', dest='sample_count', type=int, default=1000, help='number of characters to draw')
 parser.add_argument('--sample_dir', dest='sample_dir', help='directory to save examples')
 
